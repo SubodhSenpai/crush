@@ -581,6 +581,9 @@ func (a *agent) streamAndHandleEvents(ctx context.Context, sessionID string, msg
 			}
 			resultChan := make(chan toolExecResult, 1)
 
+			// Debug: log tool invocation
+			slog.Debug("Invoking tool", "tool", toolCall.Name, "id", toolCall.ID, "input", toolCall.Input)
+
 			go func() {
 				response, err := tool.Run(ctx, tools.ToolCall{
 					ID:    toolCall.ID,
@@ -606,6 +609,8 @@ func (a *agent) streamAndHandleEvents(ctx context.Context, sessionID string, msg
 				}
 				goto out
 			case result := <-resultChan:
+				// Debug: log tool result
+				slog.Debug("Tool returned", "tool", toolCall.Name, "id", toolCall.ID, "error", result.err, "output", result.response.Content)
 				toolResponse = result.response
 				toolErr = result.err
 			}

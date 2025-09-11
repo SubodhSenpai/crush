@@ -49,3 +49,9 @@ Thumbs.db
 manpages/
 completions/
 !internal/tui/components/completions/
+
+.cursorignore
+
+__pycache__/
+
+venv/

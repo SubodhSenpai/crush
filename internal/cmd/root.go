@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
+	internallog "github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/tui"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/fang"
@@ -146,6 +147,11 @@ func setupApp(cmd *cobra.Command) (*app.App, error) {
 	cfg, err := config.Init(cwd, dataDir, debug)
 	if err != nil {
 		return nil, err
+	}
+
+	// Mirror logs to console when debug to surface tool invocation logs in terminal
+	if cfg.Options != nil && cfg.Options.Debug {
+		internallog.EnableConsoleLogging(true)
 	}
 
 	if cfg.Permissions == nil {
