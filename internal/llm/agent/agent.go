@@ -434,7 +434,7 @@ func (a *agent) processGeneration(ctx context.Context, sessionID, content string
 		default:
 			// Continue processing
 		}
-		agentMessage, toolResults, err := a.streamAndHandleEvents(ctx, sessionID, msgHistory)
+		agentMessage, toolResults, err := a.streamWithFallback(ctx, sessionID, msgHistory)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				agentMessage.AddFinish(message.FinishReasonCanceled, "Request cancelled", "")
@@ -660,6 +660,110 @@ out:
 	}
 
 	return assistantMsg, &msg, err
+}
+
+// streamWithFallback attempts to stream with the current provider/model. If that fails
+// with a transient provider error, it will try other models from the same provider,
+// and finally other providers' models of the same type.
+func (a *agent) streamWithFallback(ctx context.Context, sessionID string, msgHistory []message.Message) (message.Message, *message.Message, error) {
+	attempt := 1
+	// First attempt with the configured provider/model
+	slog.Info("LLM attempt", "attempt", attempt, "provider", a.providerID, "model", a.Model().ID)
+	assistantMsg, toolResults, err := a.streamAndHandleEvents(ctx, sessionID, msgHistory)
+	if err == nil || errors.Is(err, context.Canceled) {
+		if err == nil {
+			slog.Info("LLM attempt succeeded", "attempt", attempt, "provider", a.providerID, "model", a.Model().ID)
+		}
+		return assistantMsg, toolResults, err
+	}
+
+	// Only fallback for likely transient/provider availability errors
+	// Since provider errors are opaque here, we optimistically try fallbacks once
+	cfg := config.Get()
+	modelType := a.agentCfg.Model
+	selected := cfg.Models[modelType]
+
+	// Helper to try a specific provider+model id
+	tryWith := func(providerCfg config.ProviderConfig, modelID string) (message.Message, *message.Message, error) {
+		slog.Info("LLM attempt", "attempt", attempt, "provider", providerCfg.ID, "model", modelID)
+		promptID := agentPromptMap[a.agentCfg.ID]
+		if promptID == "" {
+			promptID = prompt.PromptDefault
+		}
+		opts := []provider.ProviderClientOption{
+			provider.WithModel(modelType),
+			provider.WithSystemMessage(prompt.GetPrompt(promptID, providerCfg.ID, cfg.Options.ContextPaths...)),
+			provider.WithOverrideModelID(modelID),
+		}
+		p, pErr := provider.NewProvider(providerCfg, opts...)
+		if pErr != nil {
+			slog.Warn("LLM attempt failed (init)", "attempt", attempt, "provider", providerCfg.ID, "model", modelID, "error", pErr)
+			return assistantMsg, nil, pErr
+		}
+
+		// Temporarily swap provider fields on agent
+		originalProvider := a.provider
+		originalProviderID := a.providerID
+		a.provider = p
+		a.providerID = providerCfg.ID
+		defer func() {
+			a.provider = originalProvider
+			a.providerID = originalProviderID
+		}()
+		msg, tr, callErr := a.streamAndHandleEvents(ctx, sessionID, msgHistory)
+		if callErr == nil {
+			slog.Info("LLM attempt succeeded", "attempt", attempt, "provider", providerCfg.ID, "model", modelID)
+		} else {
+			slog.Warn("LLM attempt failed", "attempt", attempt, "provider", providerCfg.ID, "model", modelID, "error", callErr)
+		}
+		return msg, tr, callErr
+	}
+
+	// 1) Try other models within the same provider that match capabilities
+	if providerCfg := cfg.GetProviderForModel(modelType); providerCfg != nil {
+		// Gather candidate models from the same provider
+		required := cfg.GetModelByType(modelType)
+		for _, m := range providerCfg.Models {
+			if m.ID == selected.Model {
+				continue
+			}
+			// Capability checks: images
+			if required != nil {
+				if required.SupportsImages && !m.SupportsImages {
+					continue
+				}
+			}
+			attempt++
+			if msg, tr, e := tryWith(*providerCfg, m.ID); e == nil {
+				return msg, tr, nil
+			}
+		}
+	}
+
+	// 2) Try other providers' models for the same type
+	for _, other := range cfg.EnabledProviders() {
+		if other.ID == selected.Provider {
+			continue
+		}
+		required := cfg.GetModelByType(modelType)
+		// Prefer the provider's default model of this class if it exists in known list
+		for _, m := range other.Models {
+			// Basic capability filter
+			if required != nil {
+				if required.SupportsImages && !m.SupportsImages {
+					continue
+				}
+			}
+			attempt++
+			if msg, tr, e := tryWith(other, m.ID); e == nil {
+				return msg, tr, nil
+			}
+		}
+	}
+
+	// No fallback succeeded; return original error
+	slog.Error("LLM fallback exhausted", "attempts", attempt)
+	return assistantMsg, toolResults, err
 }
 
 func (a *agent) finishMessage(ctx context.Context, msg *message.Message, finishReason message.FinishReason, message, details string) {

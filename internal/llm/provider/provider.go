@@ -74,9 +74,18 @@ type providerClientOptions struct {
 	extraHeaders       map[string]string
 	extraBody          map[string]any
 	extraParams        map[string]string
+	overrideModelID    string
 }
 
 type ProviderClientOption func(*providerClientOptions)
+
+// WithOverrideModelID forces the provider to use a specific model ID
+// irrespective of the globally selected model for the given type.
+func WithOverrideModelID(modelID string) ProviderClientOption {
+	return func(options *providerClientOptions) {
+		options.overrideModelID = modelID
+	}
+}
 
 type ProviderClient interface {
 	send(ctx context.Context, messages []message.Message, tools []tools.BaseTool) (*ProviderResponse, error)
@@ -165,12 +174,23 @@ func NewProvider(cfg config.ProviderConfig, opts ...ProviderClientOption) (Provi
 		extraBody:          cfg.ExtraBody,
 		extraParams:        cfg.ExtraParams,
 		systemPromptPrefix: cfg.SystemPromptPrefix,
-		model: func(tp config.SelectedModelType) catwalk.Model {
-			return *config.Get().GetModelByType(tp)
-		},
 	}
 	for _, o := range opts {
 		o(&clientOptions)
+	}
+	// Set model resolver after applying options so overrides are respected
+	clientOptions.model = func(tp config.SelectedModelType) catwalk.Model {
+		if clientOptions.overrideModelID != "" {
+			for _, m := range cfg.Models {
+				if m.ID == clientOptions.overrideModelID {
+					return m
+				}
+			}
+			if m := config.Get().GetModel(cfg.ID, clientOptions.overrideModelID); m != nil {
+				return *m
+			}
+		}
+		return *config.Get().GetModelByType(tp)
 	}
 	switch cfg.Type {
 	case catwalk.TypeAnthropic:

@@ -511,7 +511,8 @@ func (o *openaiClient) shouldRetry(attempts int, err error) (bool, int64, error)
 			return true, 0, nil
 		}
 
-		if apiErr.StatusCode != 429 && apiErr.StatusCode != 500 {
+		// Retry on common transient errors
+		if apiErr.StatusCode != 429 && apiErr.StatusCode != 500 && apiErr.StatusCode != 503 {
 			return false, 0, err
 		}
 
