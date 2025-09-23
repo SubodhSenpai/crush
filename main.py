@@ -104,6 +104,19 @@ def run_powershell_sync(command: str, cwd: Optional[str] = None) -> tuple[str, s
     )
     return completed.stdout or "", completed.stderr or "", completed.returncode
 
+def run_process_sync(exe: str, args: list[str], cwd: Optional[str] = None) -> tuple[str, str, int]:
+    """Run a process directly (no PowerShell) and capture stdout/stderr."""
+    completed = subprocess.run(
+        [exe, *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        shell=False,
+    )
+    return completed.stdout or "", completed.stderr or "", completed.returncode
+
 ansi_escape_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 def strip_ansi(text: Optional[str]) -> str:
@@ -189,11 +202,26 @@ async def execute_command(request: CommandRequest, background_tasks: BackgroundT
         # Directory where crush.exe resides; we will run PowerShell from there
         bin_dir = os.path.dirname(crush_path)
 
-        # Run a single hidden process that captures stdout/stderr and wait for completion
+        # Prefer running the binary directly to avoid PowerShell quoting issues with multi-line prompts
+        exe_path = os.path.join(bin_dir, "crush.exe")
+        argv: list[str] = [
+            "-p", request.prompt,
+            "-m", request.model,
+        ]
+        if request.cwd:
+            argv.extend(["--cwd", request.cwd])
+        if request.yolo:
+            argv.append("-y")
+        if request.debug:
+            argv.append("-d")
+        if request.quiet:
+            argv.append("-q")
+
+        # Run and capture output
         import time
         start_ts = time.time()
         stdout_text, stderr_text, return_code = await asyncio.to_thread(
-            run_powershell_sync, command, bin_dir
+            run_process_sync, exe_path, argv, bin_dir
         )
         duration = time.time() - start_ts
 
