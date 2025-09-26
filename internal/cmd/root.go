@@ -209,6 +209,8 @@ func setupApp(cmd *cobra.Command) (*app.App, error) {
 			cfg.Models = make(map[config.SelectedModelType]config.SelectedModel)
 		}
 		cfg.Models[config.SelectedModelTypeLarge] = selected
+		// Use the provided model everywhere: also override the small model selection
+		cfg.Models[config.SelectedModelTypeSmall] = selected
 	}
 
 	if err := createDotCrushDir(cfg.Options.DataDirectory); err != nil {

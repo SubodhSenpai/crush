@@ -678,7 +678,13 @@ func (a *agent) streamWithFallback(ctx context.Context, sessionID string, msgHis
 	}
 
 	// Only fallback for likely transient/provider availability errors
-	// Since provider errors are opaque here, we optimistically try fallbacks once
+	if !isTransientProviderError(err) {
+		// Return immediately if the initial error is not a transient/provider availability error
+		slog.Warn("LLM no-fallback due to non-transient error", "provider", a.providerID, "model", a.Model().ID, "error", err)
+		return assistantMsg, toolResults, err
+	}
+
+	// For transient errors (e.g., 429/quota/overloaded/unavailable), try same-provider models first
 	cfg := config.Get()
 	modelType := a.agentCfg.Model
 	selected := cfg.Models[modelType]
@@ -764,6 +770,29 @@ func (a *agent) streamWithFallback(ctx context.Context, sessionID string, msgHis
 	// No fallback succeeded; return original error
 	slog.Error("LLM fallback exhausted", "attempts", attempt)
 	return assistantMsg, toolResults, err
+}
+
+// isTransientProviderError returns true if the error text indicates conditions where a retry/fallback is reasonable.
+func isTransientProviderError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	substrings := []string{
+		"429", "rate limit", "too many requests", "quota", "insufficient_quota",
+		"overloaded", "temporarily unavailable", "unavailable", "try again later",
+		"503", "500", "529",
+	}
+	for _, sub := range substrings {
+		if strings.Contains(lower, sub) {
+			return true
+		}
+	}
+	// Also handle our provider retry cap error text
+	if strings.Contains(lower, "maximum retry attempts reached for rate limit") {
+		return true
+	}
+	return false
 }
 
 func (a *agent) finishMessage(ctx context.Context, msg *message.Message, finishReason message.FinishReason, message, details string) {
