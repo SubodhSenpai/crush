@@ -157,5 +157,5 @@ Once the server is running, visit `http://localhost:9000/docs` for interactive A
 3. **Command failures**: Check the error field in the response for detailed error information
 4. **Connection refused**: Ensure the server is running on the correct port (8000)
 
-
-uvicorn main:app --host 0.0.0.0 --port 9000 --reload 
+C:\Users\Subhodh\Downloads\proxieAIWorkflow\crush>go build -o crush.exe   
+C:\Users\Subhodh\Downloads\proxieAIWorkflow\crush>uvicorn main:app --host 0.0.0.0 --port 9000 --reload 

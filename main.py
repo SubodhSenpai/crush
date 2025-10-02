@@ -10,7 +10,7 @@ import json
 import os
 import tempfile
 import shlex
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union, List
 from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -39,12 +39,13 @@ app = FastAPI(
 class CommandRequest(BaseModel):
     """Request model for command execution"""
     prompt: str = Field(..., description="The prompt to send to crush")
-    model: Optional[str] = Field("openai:gpt-4o", description="Model to use (provider:model)")
+    model: Optional[Union[str, List[str]]] = Field("openai:gpt-4o", description="Model(s) to use (provider:model). Accepts a string or a list of strings.")
     cwd: Optional[str] = Field(None, description="Current working directory")
     yolo: bool = Field(True, description="Automatically accept all permissions")
     debug: bool = Field(False, description="Enable debug mode")
     quiet: bool = Field(False, description="Hide spinner when using --prompt")
 
+# --- api response model ---
 class CommandResponse(BaseModel):
     """Response model for command execution"""
     success: bool
@@ -55,6 +56,11 @@ class CommandResponse(BaseModel):
     stderr: Optional[str] = None
     exit_code: Optional[int] = None
     duration: Optional[float] = None
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    cost: Optional[float] = None
 
 class HealthResponse(BaseModel):
     """Health check response"""
@@ -206,8 +212,14 @@ async def execute_command(request: CommandRequest, background_tasks: BackgroundT
         exe_path = os.path.join(bin_dir, "crush.exe")
         argv: list[str] = [
             "-p", request.prompt,
-            "-m", request.model,
         ]
+        # Accept either a single model or a list of models and pass them through as repeated -m flags
+        if isinstance(request.model, list):
+            for m in request.model:
+                if m:
+                    argv.extend(["-m", m])
+        elif isinstance(request.model, str) and request.model:
+            argv.extend(["-m", request.model])
         if request.cwd:
             argv.extend(["--cwd", request.cwd])
         if request.yolo:
@@ -232,6 +244,31 @@ async def execute_command(request: CommandRequest, background_tasks: BackgroundT
         # Consider success when exit code is 0, or when stdout has content and stderr only contains ANSI control codes
         success = (return_code == 0) or (cleaned_stdout != "" and cleaned_stderr == "")
 
+        # Try to read token/cost data from the crush SQLite DB (best-effort)
+        prompt_toks = None
+        completion_toks = None
+        cost_val: Optional[float] = None
+        model_used = None
+        provider_used = None
+        try:
+            db_path = os.path.join(bin_dir, ".crush", "crush.db")
+            if os.path.exists(db_path):
+                import sqlite3, time as _t
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("SELECT prompt_tokens, completion_tokens, cost FROM sessions ORDER BY created_at DESC LIMIT 1")
+                row = cur.fetchone()
+                conn.close()
+                if row:
+                    prompt_toks = row["prompt_tokens"]
+                    completion_toks = row["completion_tokens"]
+                    cost_val = row["cost"]
+                    model_used = row["model"] if row["model"] else None
+                    provider_used = row["provider"] if row["provider"] else None
+        except Exception:
+            pass  # ignore db errors, keep response lean
+
         response = CommandResponse(
             success=success,
             command=command,
@@ -239,6 +276,12 @@ async def execute_command(request: CommandRequest, background_tasks: BackgroundT
             stdout=cleaned_stdout if cleaned_stdout else None,
             stderr=cleaned_stderr if cleaned_stderr else None,
             exit_code=return_code,
+            duration=duration,
+            prompt_tokens=prompt_toks,
+            completion_tokens=completion_toks,
+            cost=cost_val,
+            model=model_used,
+            provider=provider_used,
         )
 
         return response

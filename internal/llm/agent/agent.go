@@ -684,7 +684,6 @@ func (a *agent) streamWithFallback(ctx context.Context, sessionID string, msgHis
 		return assistantMsg, toolResults, err
 	}
 
-	// For transient errors (e.g., 429/quota/overloaded/unavailable), try same-provider models first
 	cfg := config.Get()
 	modelType := a.agentCfg.Model
 	selected := cfg.Models[modelType]
@@ -724,6 +723,28 @@ func (a *agent) streamWithFallback(ctx context.Context, sessionID string, msgHis
 		}
 		return msg, tr, callErr
 	}
+
+	// For transient errors (e.g., 429/quota/overloaded/unavailable), try explicit runtime fallback list first
+	runtimeFallbacks := cfg.RuntimeFallbackModels
+	for _, sel := range runtimeFallbacks {
+		attempt++
+		provCfg, ok := cfg.Providers.Get(sel.Provider)
+		if !ok || provCfg.Disable {
+			continue
+		}
+		if msg, tr, e := tryWith(provCfg, sel.Model); e == nil {
+			return msg, tr, nil
+		}
+	}
+
+	// If user provided explicit fallback models, stop here (do not continue to automatic provider/model fallback)
+	if len(runtimeFallbacks) > 0 {
+		slog.Error("LLM runtime fallback exhausted", "attempts", attempt)
+		return assistantMsg, toolResults, err
+	}
+
+	// If none of the runtime fallbacks worked, fall back to automatic: same provider other models, then other providers
+	// --- existing automatic fallback logic below ---
 
 	// 1) Try other models within the same provider that match capabilities
 	if providerCfg := cfg.GetProviderForModel(modelType); providerCfg != nil {

@@ -252,6 +252,10 @@ type Config struct {
 	Options *Options `json:"options,omitempty" jsonschema:"description=General application options"`
 
 	Permissions *Permissions `json:"permissions,omitempty" jsonschema:"description=Permission settings for tool usage"`
+	// RuntimeFallbackModels holds any additional models provided via the -m flag
+	// at runtime (beyond the primary first model). These are used as an explicit
+	// fallback order before the automatic provider/model fallbacks kick in.
+	RuntimeFallbackModels []SelectedModel `json:"-"`
 
 	// Internal
 	workingDir string `json:"-"`

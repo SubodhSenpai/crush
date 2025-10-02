@@ -29,8 +29,8 @@ func init() {
 	rootCmd.Flags().BoolP("help", "h", false, "Help")
 	rootCmd.Flags().BoolP("yolo", "y", false, "Automatically accept all permissions (dangerous mode)")
 
-	// Model override (applies to all subcommands)
-	rootCmd.PersistentFlags().StringP("model", "m", "", "Override the large model for this run (provider:model or model)")
+	// Multi model override (first is primary, rest fallback)
+	rootCmd.PersistentFlags().StringArrayP("model", "m", []string{}, "Override models for this run; you can specify -m model1 -m provider:model2 ... the first is primary, others act as fallbacks")
 
 	// Non-interactive single-prompt flags
 	rootCmd.Flags().StringP("prompt", "p", "", "Run a single prompt and exit (non-interactive mode)")
@@ -160,57 +160,68 @@ func setupApp(cmd *cobra.Command) (*app.App, error) {
 	cfg.Permissions.SkipRequests = yolo
 
 	// Apply runtime model override if provided
-	if modelFlag, _ := cmd.Flags().GetString("model"); modelFlag != "" {
-		var providerID, modelID string
-		if strings.Contains(modelFlag, ":") {
-			parts := strings.SplitN(modelFlag, ":", 2)
-			providerID, modelID = parts[0], parts[1]
-			if cfg.GetModel(providerID, modelID) == nil {
-				return nil, fmt.Errorf("model %s not found in provider %s", modelID, providerID)
-			}
-		} else {
-			found := false
-			ambiguous := false
-			for p := range cfg.Providers.Seq() {
-				if p.Disable {
-					continue
+	modelFlags, _ := cmd.Flags().GetStringArray("model")
+	if len(modelFlags) > 0 {
+		var fallbackModels []config.SelectedModel
+		for idx, flagVal := range modelFlags {
+			var providerID, modelID string
+			if strings.Contains(flagVal, ":") {
+				parts := strings.SplitN(flagVal, ":", 2)
+				providerID, modelID = parts[0], parts[1]
+
+				if cfg.GetModel(providerID, modelID) == nil {
+					return nil, fmt.Errorf("model %s not found in provider %s", modelID, providerID)
 				}
-				for _, m := range p.Models {
-					if m.ID == modelFlag {
-						if found {
-							ambiguous = true
-							break
+			} else {
+				found := false
+				ambiguous := false
+				for p := range cfg.Providers.Seq() {
+					if p.Disable {
+						continue
+					}
+					for _, m := range p.Models {
+						if m.ID == flagVal {
+							if found {
+								ambiguous = true
+								break
+							}
+							providerID = p.ID
+							modelID = m.ID
+							found = true
 						}
-						providerID = p.ID
-						modelID = m.ID
-						found = true
+					}
+					if ambiguous {
+						break
 					}
 				}
 				if ambiguous {
-					break
+					return nil, fmt.Errorf("model %s is available in multiple providers; use provider:model", flagVal)
+				}
+				if !found {
+					return nil, fmt.Errorf("model %s not found in any enabled provider", flagVal)
 				}
 			}
-			if ambiguous {
-				return nil, fmt.Errorf("model %s is available in multiple providers; use provider:model", modelFlag)
+
+			model := cfg.GetModel(providerID, modelID)
+			selected := config.SelectedModel{
+				Provider:        providerID,
+				Model:           modelID,
+				MaxTokens:       model.DefaultMaxTokens,
+				ReasoningEffort: model.DefaultReasoningEffort,
 			}
-			if !found {
-				return nil, fmt.Errorf("model %s not found in any enabled provider", modelFlag)
+
+			if idx == 0 {
+				// primary in both large and small
+				if cfg.Models == nil {
+					cfg.Models = make(map[config.SelectedModelType]config.SelectedModel)
+				}
+				cfg.Models[config.SelectedModelTypeLarge] = selected
+				cfg.Models[config.SelectedModelTypeSmall] = selected
+			} else {
+				fallbackModels = append(fallbackModels, selected)
 			}
 		}
-		model := cfg.GetModel(providerID, modelID)
-		selected := config.SelectedModel{
-			Provider:        providerID,
-			Model:           modelID,
-			MaxTokens:       model.DefaultMaxTokens,
-			ReasoningEffort: model.DefaultReasoningEffort,
-		}
-		// In-memory override for this run only
-		if cfg.Models == nil {
-			cfg.Models = make(map[config.SelectedModelType]config.SelectedModel)
-		}
-		cfg.Models[config.SelectedModelTypeLarge] = selected
-		// Use the provided model everywhere: also override the small model selection
-		cfg.Models[config.SelectedModelTypeSmall] = selected
+		cfg.RuntimeFallbackModels = fallbackModels
 	}
 
 	if err := createDotCrushDir(cfg.Options.DataDirectory); err != nil {
